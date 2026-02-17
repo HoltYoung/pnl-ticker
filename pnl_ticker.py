@@ -73,17 +73,8 @@ class PnLOverlay:
         )
         self.bps_label.pack()
 
-        # Dollar PnL label (smaller)
-        self.pnl_label = tk.Label(
-            self.root,
-            text="",
-            font=("Helvetica", 10),
-            fg="#888888",
-            bg="#1a1a2e",
-            padx=10,
-            pady=0,
-        )
-        self.pnl_label.pack()
+        # Spacer (no dollar label)
+        self.pnl_label = None
 
         # Time label
         self.time_label = tk.Label(
@@ -115,11 +106,9 @@ class PnLOverlay:
 
         # Click to toggle details
         self.bps_label.bind("<Button-1>", self.toggle_details)
-        self.pnl_label.bind("<Button-1>", self.toggle_details)
 
         # Right click to quit
         self.bps_label.bind("<Button-3>", lambda e: self.root.quit())
-        self.pnl_label.bind("<Button-3>", lambda e: self.root.quit())
 
         # Drag to move
         self.bps_label.bind("<ButtonPress-1>", self.start_drag)
@@ -224,7 +213,6 @@ class PnLOverlay:
 
         def update_ui():
             self.bps_label.config(text=bps_text, fg=color)
-            self.pnl_label.config(text=f"${total_pnl:+.2f}")
             self.time_label.config(text=f"Updated {now_str}")
             # If details are showing, refresh them
             if self.details_visible:

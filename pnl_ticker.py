@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-PnL Ticker — macOS menu bar app showing live portfolio PnL in bps.
-Sits in the top-right menu bar, always visible. Refreshes every 60 seconds.
+PnL Ticker — System tray app showing live portfolio PnL in bps.
+Works on Windows, macOS, and Linux.
+Uses a floating overlay window for always-visible BPS display.
 """
 
 import threading
 import time
-import rumps
+import tkinter as tk
 import yfinance as yf
 
 # ============================================================
@@ -48,116 +49,196 @@ SHORTS = {
 REFRESH_SECONDS = 60
 
 
-class PnLTicker(rumps.App):
+class PnLOverlay:
     def __init__(self):
-        super().__init__("📊 --", quit_button=None)
-        self.menu = [
-            rumps.MenuItem("Loading...", callback=None),
-            None,  # separator
-            rumps.MenuItem("Refresh Now", callback=self.manual_refresh),
-            rumps.MenuItem("Quit", callback=rumps.quit_application),
-        ]
-        self.long_items = {}
-        self.short_items = {}
-        self.summary_item = self.menu["Loading..."]
+        self.root = tk.Tk()
+        self.root.title("PnL")
+        self.root.overrideredirect(True)  # no title bar
+        self.root.attributes("-topmost", True)  # always on top
+        self.root.configure(bg="#1a1a2e")
 
-        # Start background thread
-        self.thread = threading.Thread(target=self.refresh_loop, daemon=True)
-        self.thread.start()
+        # Position: top right of screen
+        screen_w = self.root.winfo_screenwidth()
+        self.root.geometry(f"+{screen_w - 220}+5")
 
-    def manual_refresh(self, _):
-        self.title = "📊 ..."
-        threading.Thread(target=self.fetch_and_update, daemon=True).start()
+        # Main BPS label (big)
+        self.bps_label = tk.Label(
+            self.root,
+            text="Loading...",
+            font=("Helvetica", 16, "bold"),
+            fg="#00ff88",
+            bg="#1a1a2e",
+            padx=10,
+            pady=2,
+        )
+        self.bps_label.pack()
+
+        # Dollar PnL label (smaller)
+        self.pnl_label = tk.Label(
+            self.root,
+            text="",
+            font=("Helvetica", 10),
+            fg="#888888",
+            bg="#1a1a2e",
+            padx=10,
+            pady=0,
+        )
+        self.pnl_label.pack()
+
+        # Time label
+        self.time_label = tk.Label(
+            self.root,
+            text="",
+            font=("Helvetica", 8),
+            fg="#555555",
+            bg="#1a1a2e",
+            padx=10,
+            pady=0,
+        )
+        self.time_label.pack()
+
+        # Detail panel (hidden by default, shown on click)
+        self.detail_frame = tk.Frame(self.root, bg="#1a1a2e")
+        self.detail_text = tk.Text(
+            self.detail_frame,
+            font=("Courier", 9),
+            fg="#cccccc",
+            bg="#0f0f23",
+            width=35,
+            height=20,
+            relief="flat",
+            state="disabled",
+        )
+        self.detail_text.pack(padx=5, pady=5)
+        self.details_visible = False
+        self.detail_content = ""
+
+        # Click to toggle details
+        self.bps_label.bind("<Button-1>", self.toggle_details)
+        self.pnl_label.bind("<Button-1>", self.toggle_details)
+
+        # Right click to quit
+        self.bps_label.bind("<Button-3>", lambda e: self.root.quit())
+        self.pnl_label.bind("<Button-3>", lambda e: self.root.quit())
+
+        # Drag to move
+        self.bps_label.bind("<ButtonPress-1>", self.start_drag)
+        self.bps_label.bind("<B1-Motion>", self.do_drag)
+        self._drag_x = 0
+        self._drag_y = 0
+
+        # Start fetching
+        self.fetch_thread = threading.Thread(target=self.refresh_loop, daemon=True)
+        self.fetch_thread.start()
+
+    def start_drag(self, event):
+        self._drag_x = event.x
+        self._drag_y = event.y
+
+    def do_drag(self, event):
+        x = self.root.winfo_x() + event.x - self._drag_x
+        y = self.root.winfo_y() + event.y - self._drag_y
+        self.root.geometry(f"+{x}+{y}")
+
+    def toggle_details(self, event=None):
+        if self.details_visible:
+            self.detail_frame.pack_forget()
+            self.details_visible = False
+        else:
+            self.detail_frame.pack()
+            self.detail_text.config(state="normal")
+            self.detail_text.delete("1.0", "end")
+            self.detail_text.insert("1.0", self.detail_content)
+            self.detail_text.config(state="disabled")
+            self.details_visible = True
 
     def refresh_loop(self):
         while True:
-            self.fetch_and_update()
+            try:
+                self.fetch_and_update()
+            except Exception as e:
+                self.root.after(0, lambda: self.bps_label.config(text="ERR", fg="#ff4444"))
+                print(f"Error: {e}")
             time.sleep(REFRESH_SECONDS)
 
     def fetch_and_update(self):
-        try:
-            all_tickers = list(LONGS.keys()) + list(SHORTS.keys())
-            tickers_obj = {t: yf.Ticker(t) for t in all_tickers}
+        all_tickers = list(LONGS.keys()) + list(SHORTS.keys())
+        tickers_obj = {t: yf.Ticker(t) for t in all_tickers}
 
-            total_pnl = 0.0
-            total_val = 0.0
-            details_long = []
-            details_short = []
+        total_pnl = 0.0
+        total_val = 0.0
+        details_long = []
+        details_short = []
 
-            for t, (entry, val) in sorted(LONGS.items()):
-                try:
-                    info = tickers_obj[t].info
-                    now = info.get("currentPrice") or info.get("regularMarketPrice")
-                    if now is None:
-                        continue
-                    pnl = val * (now - entry) / entry
-                    chg = ((now - entry) / entry) * 100
-                    total_pnl += pnl
-                    total_val += abs(val)
-                    emoji = "🟢" if pnl >= 0 else "🔴"
-                    details_long.append(f"{emoji} {t}: {chg:+.1f}% (${pnl:+.2f})")
-                except Exception:
-                    details_long.append(f"⚪ {t}: error")
+        for t, (entry, val) in sorted(LONGS.items()):
+            try:
+                info = tickers_obj[t].info
+                now = info.get("currentPrice") or info.get("regularMarketPrice")
+                if now is None:
+                    continue
+                pnl = val * (now - entry) / entry
+                chg = ((now - entry) / entry) * 100
+                total_pnl += pnl
+                total_val += abs(val)
+                marker = "+" if pnl >= 0 else "-"
+                details_long.append(f" {marker} {t:6s} {chg:+6.1f}%  ${pnl:+7.2f}")
+            except Exception:
+                details_long.append(f" ? {t:6s}  error")
 
-            for t, (entry, val) in sorted(SHORTS.items()):
-                try:
-                    info = tickers_obj[t].info
-                    now = info.get("currentPrice") or info.get("regularMarketPrice")
-                    if now is None:
-                        continue
-                    pnl = val * (entry - now) / entry
-                    chg = ((entry - now) / entry) * 100
-                    total_pnl += pnl
-                    total_val += abs(val)
-                    emoji = "🟢" if pnl >= 0 else "🔴"
-                    details_short.append(f"{emoji} {t}: {chg:+.1f}% (${pnl:+.2f})")
-                except Exception:
-                    details_short.append(f"⚪ {t}: error")
+        for t, (entry, val) in sorted(SHORTS.items()):
+            try:
+                info = tickers_obj[t].info
+                now = info.get("currentPrice") or info.get("regularMarketPrice")
+                if now is None:
+                    continue
+                pnl = val * (entry - now) / entry
+                chg = ((entry - now) / entry) * 100
+                total_pnl += pnl
+                total_val += abs(val)
+                marker = "+" if pnl >= 0 else "-"
+                details_short.append(f" {marker} {t:6s} {chg:+6.1f}%  ${pnl:+7.2f}")
+            except Exception:
+                details_short.append(f" ? {t:6s}  error")
 
-            if total_val > 0:
-                bps = (total_pnl / total_val) * 10000
-            else:
-                bps = 0
+        if total_val > 0:
+            bps = (total_pnl / total_val) * 10000
+        else:
+            bps = 0
 
-            # Update menu bar title
-            if bps >= 0:
-                self.title = f"📈 +{bps:.0f}bps (${total_pnl:+.2f})"
-            else:
-                self.title = f"📉 {bps:.0f}bps (${total_pnl:+.2f})"
+        # Build detail content
+        self.detail_content = "=== LONGS ===\n"
+        self.detail_content += "\n".join(details_long)
+        self.detail_content += "\n\n=== SHORTS ===\n"
+        self.detail_content += "\n".join(details_short)
+        self.detail_content += f"\n\nTotal: ${total_pnl:+.2f} | {bps:+.0f}bps"
 
-            # Rebuild menu
-            self.menu.clear()
+        # Update labels on main thread
+        now_str = time.strftime("%I:%M %p")
 
-            self.menu.add(rumps.MenuItem(
-                f"Portfolio: {bps:+.0f} bps | ${total_pnl:+.2f}",
-                callback=None
-            ))
-            self.menu.add(None)
+        if bps >= 0:
+            color = "#00ff88"
+            bps_text = f"+{bps:.0f} bps"
+        else:
+            color = "#ff4444"
+            bps_text = f"{bps:.0f} bps"
 
-            # Longs header
-            self.menu.add(rumps.MenuItem("── LONGS ──", callback=None))
-            for detail in details_long:
-                self.menu.add(rumps.MenuItem(detail, callback=None))
+        def update_ui():
+            self.bps_label.config(text=bps_text, fg=color)
+            self.pnl_label.config(text=f"${total_pnl:+.2f}")
+            self.time_label.config(text=f"Updated {now_str}")
+            # If details are showing, refresh them
+            if self.details_visible:
+                self.detail_text.config(state="normal")
+                self.detail_text.delete("1.0", "end")
+                self.detail_text.insert("1.0", self.detail_content)
+                self.detail_text.config(state="disabled")
 
-            self.menu.add(None)
+        self.root.after(0, update_ui)
 
-            # Shorts header
-            self.menu.add(rumps.MenuItem("── SHORTS ──", callback=None))
-            for detail in details_short:
-                self.menu.add(rumps.MenuItem(detail, callback=None))
-
-            self.menu.add(None)
-            self.menu.add(rumps.MenuItem(
-                f"Last update: {time.strftime('%I:%M:%S %p')}",
-                callback=None
-            ))
-            self.menu.add(rumps.MenuItem("Refresh Now", callback=self.manual_refresh))
-            self.menu.add(rumps.MenuItem("Quit", callback=rumps.quit_application))
-
-        except Exception as e:
-            self.title = "📊 ERR"
-            print(f"Error: {e}")
+    def run(self):
+        self.root.mainloop()
 
 
 if __name__ == "__main__":
-    PnLTicker().run()
+    app = PnLOverlay()
+    app.run()

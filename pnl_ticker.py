@@ -46,7 +46,7 @@ SHORTS = {
     "TJX": (154.46, 243.18),
 }
 
-REFRESH_SECONDS = 60
+REFRESH_SECONDS = 5
 
 
 class PnLOverlay:
@@ -152,7 +152,19 @@ class PnLOverlay:
 
     def fetch_and_update(self):
         all_tickers = list(LONGS.keys()) + list(SHORTS.keys())
-        tickers_obj = {t: yf.Ticker(t) for t in all_tickers}
+
+        # Batch download — much faster than per-ticker .info calls
+        data = yf.download(all_tickers, period="1d", interval="1m", progress=False)
+        
+        # Get latest price for each ticker
+        prices = {}
+        for t in all_tickers:
+            try:
+                col = data["Close"][t].dropna()
+                if len(col) > 0:
+                    prices[t] = float(col.iloc[-1])
+            except Exception:
+                pass
 
         total_pnl = 0.0
         total_val = 0.0
@@ -160,34 +172,28 @@ class PnLOverlay:
         details_short = []
 
         for t, (entry, val) in sorted(LONGS.items()):
-            try:
-                info = tickers_obj[t].info
-                now = info.get("currentPrice") or info.get("regularMarketPrice")
-                if now is None:
-                    continue
-                pnl = val * (now - entry) / entry
-                chg = ((now - entry) / entry) * 100
-                total_pnl += pnl
-                total_val += abs(val)
-                marker = "+" if pnl >= 0 else "-"
-                details_long.append(f" {marker} {t:6s} {chg:+6.1f}%  ${pnl:+7.2f}")
-            except Exception:
-                details_long.append(f" ? {t:6s}  error")
+            now = prices.get(t)
+            if now is None:
+                details_long.append(f" ? {t:6s}  no data")
+                continue
+            pnl = val * (now - entry) / entry
+            chg = ((now - entry) / entry) * 100
+            total_pnl += pnl
+            total_val += abs(val)
+            marker = "+" if pnl >= 0 else "-"
+            details_long.append(f" {marker} {t:6s} {chg:+6.1f}%  ${pnl:+7.2f}")
 
         for t, (entry, val) in sorted(SHORTS.items()):
-            try:
-                info = tickers_obj[t].info
-                now = info.get("currentPrice") or info.get("regularMarketPrice")
-                if now is None:
-                    continue
-                pnl = val * (entry - now) / entry
-                chg = ((entry - now) / entry) * 100
-                total_pnl += pnl
-                total_val += abs(val)
-                marker = "+" if pnl >= 0 else "-"
-                details_short.append(f" {marker} {t:6s} {chg:+6.1f}%  ${pnl:+7.2f}")
-            except Exception:
-                details_short.append(f" ? {t:6s}  error")
+            now = prices.get(t)
+            if now is None:
+                details_short.append(f" ? {t:6s}  no data")
+                continue
+            pnl = val * (entry - now) / entry
+            chg = ((entry - now) / entry) * 100
+            total_pnl += pnl
+            total_val += abs(val)
+            marker = "+" if pnl >= 0 else "-"
+            details_short.append(f" {marker} {t:6s} {chg:+6.1f}%  ${pnl:+7.2f}")
 
         if total_val > 0:
             bps = (total_pnl / total_val) * 10000
